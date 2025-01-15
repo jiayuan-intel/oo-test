@@ -1,0 +1,82 @@
+To dump all DMAR mappings in the ACRN hypervisor, we can use the provided structures and functions in the `vtd.c` file. Here's an outline of how we can accomplish this:
+
+1. **Access Root Table:** Start with the `dmar_drhd_rt` structure to access the `root_table_addr`. The root table maps PCI bus numbers to their corresponding context tables.
+
+2. **Access Context Table:** Use the `get_ctx_table()` function for each bus to obtain the context table. Each entry in the context table corresponds to a device and contains a pointer to the second-level page table (SLPT).
+
+3. **Access Second-Level Page Tables (SLPT):** For each valid context entry, follow the SLPT pointer to access the mappings from IOVA to HPA.
+
+4. **Iterate Over Devices:** Loop through all buses and devices within each bus to extract and log all relevant mappings.
+
+Here’s the code to achieve this:
+
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include "vtd.h"
+
+void dump_dmar_mappings(void) {
+    struct dmar_drhd_rt *dmar_unit;
+    uint64_t *root_table;
+    uint64_t *context_table;
+    uint64_t *slpt_entry;
+    uint64_t context_table_addr;
+    uint64_t slpt_ptr;
+    int i, j, k;
+
+    printf("Dumping DMAR Mappings...\n");
+
+    for (i = 0; i < platform_dmar_info->drhd_count; i++) {
+        dmar_unit = &dmar_drhd_units[i];
+        if (dmar_unit->drhd->ignore) {
+            continue;
+        }
+
+        root_table = (uint64_t *)hpa2hva(dmar_unit->root_table_addr);
+        printf("DMAR Unit %d Root Table: %p\n", i, root_table);
+
+        for (j = 0; j < ACFG_MAX_PCI_BUS_NUM; j++) {
+            uint64_t root_entry = root_table[j];
+            if (!(root_entry & ROOT_ENTRY_LOWER_PRESENT_MASK)) {
+                continue; // Skip if not present
+            }
+
+            context_table_addr = (root_entry & ROOT_ENTRY_LOWER_CTP_MASK) >> ROOT_ENTRY_LOWER_CTP_POS;
+            context_table = (uint64_t *)hpa2hva(context_table_addr << PAGE_SHIFT);
+            printf("  Bus %d Context Table: %p\n", j, context_table);
+
+            for (k = 0; k < 32; k++) { // 32 devices/functions per bus
+                uint64_t context_entry = context_table[k];
+                if (!(context_entry & CTX_ENTRY_LOWER_P_MASK)) {
+                    continue; // Skip if not present
+                }
+
+                slpt_ptr = (context_entry & CTX_ENTRY_LOWER_SLPTPTR_MASK) >> CTX_ENTRY_LOWER_SLPTPTR_POS;
+                slpt_entry = (uint64_t *)hpa2hva(slpt_ptr << PAGE_SHIFT);
+                printf("    Device %d SLPT: %p\n", k, slpt_entry);
+
+                // Iterate over SLPT entries (assume 4KB pages for simplicity)
+                for (int l = 0; l < 512; l++) {
+                    if (slpt_entry[l] & 1) { // Check if valid
+                        uint64_t iova = (l << 12); // IOVA for this entry
+                        uint64_t hpa = slpt_entry[l] & ~0xFFFUL; // Mask out flags
+                        printf("      IOVA: 0x%lx -> HPA: 0x%lx\n", iova, hpa);
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### **Key Points in the Code**
+1. **Root Table Access:** The root table is accessed using the `root_table_addr` from `dmar_drhd_rt`.
+2. **Context Table Access:** Extracted from each valid root table entry.
+3. **SLPT Parsing:** Loops through SLPT entries to dump IOVA-to-HPA mappings.
+4. **Iterative Approach:** Covers all DMAR units, buses, and devices.
+
+### **Integration**
+- Add this function to the `vtd.c` file and invoke it during initialization or as part of a debugging routine.
+- Ensure you include appropriate locking mechanisms if you invoke this function in a running system.
+
+This approach provides detailed mapping dumps that can validate the configuration and isolation of DMA memory.
